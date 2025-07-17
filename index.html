@@ -1,0 +1,211 @@
+---
+project:
+  type: website
+
+title: "Ireland vs The World: COVID-19 Analysis"
+author: "Délcio Jasse"
+format:
+  html:
+    toc: true
+    number-sections: true
+    theme: litera
+    code-fold: true
+    code-tools: true
+editor: visual
+
+website:
+  title: "Ireland vs The World"
+  navbar:
+    left:
+      - href: index.qmd
+        text: Home
+---
+
+Introduction
+
+This report presents a comparative analysis of the COVID-19 pandemic in Ireland and nine other countries from 2020 to 2022. We explore total case counts, progression over time, and relationships between different metrics using visualizations created with ggplot2 and enhanced using plotly.
+
+The analysis draws on datasets provided by Our World in Data and aims to assess how Ireland's pandemic response compares globally. The selected countries span Europe, Africa, and Eurasia, providing diverse policy and healthcare contexts.
+
+Setup and Load Data
+
+{r setup, include=FALSE}
+library(tidyverse)
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(plotly)
+library(lubridate)
+library(knitr)
+library(purrr)  # added for nested population handling
+
+# Load datasets
+country_data <- read_csv("data/country_data.csv")
+country_metadata <- read_csv("data/country_metadata.csv")
+
+Data Cleaning and Transformation
+
+{r data-cleaning}
+name_map <- c(
+  "England" = "United Kingdom",
+  "Russia" = "Russian Federation",
+  "Kyrgyzstan" = "Kyrgyz Republic",
+  "Yemen" = "Yemen",
+  "Mauritania" = "Mauritania",
+  "Belarus" = "Belarus"
+)
+
+study_data_names <- c("Ireland", "Germany", "France", "England", 
+                      "Nigeria", "Egypt", "South Africa", 
+                      "Russia", "Belarus", "Turkey",
+                      "Mauritania", "Yemen", "Kyrgyzstan")
+
+cases_by_country <- country_data %>%
+  group_by(location) %>%
+  summarise(total_cases = if (all(is.na(total_cases))) NA_real_ else max(total_cases, na.rm = TRUE), .groups = "drop") %>%
+  filter(!is.na(total_cases)) %>%
+  mutate(location = recode(location, !!!name_map))
+
+Check for Map Matching Issues
+
+{r map-mismatches}
+anti_join(cases_by_country, 
+          ne_countries(scale = "medium", returnclass = "sf"), 
+          by = c("location" = "name"))
+
+Summary Table
+
+{r summary-table}
+cases_by_country %>%
+  mutate(total_cases = scales::comma(total_cases)) %>%
+  kable(caption = "Total COVID-19 Cases by Country (2020–2022)")
+
+World Map of COVID-19 Total Cases
+
+{r world-map, echo=FALSE}
+world <- ne_countries(scale = "medium", returnclass = "sf")
+top10 <- cases_by_country %>% top_n(10, total_cases)
+world_data <- left_join(world, cases_by_country, by = c("name" = "location")) %>%
+  mutate(highlight = name %in% top10$location)
+
+map_plot <- ggplot(world_data) +
+  geom_sf(aes(fill = total_cases, alpha = highlight,
+            text = paste0("<b>", name, "</b><br>Total Cases: ",
+            ifelse(is.na(total_cases), "Data Unavailable", scales::comma(total_cases)))),
+        color = "white", size = 0.2) +
+  scale_fill_viridis_c(option = "plasma", direction = -1, na.value = "lightgrey",
+                     limits = c(0, max(world_data$total_cases, na.rm = TRUE)),
+                     oob = scales::squish) +
+  labs(title = "COVID-19 Total Cases (2020–2022)",
+       subtitle = "Ireland and 9 Comparison Countries",
+       fill = "Total Cases") +
+  scale_alpha_manual(values = c("TRUE" = 1, "FALSE" = 0.4), guide = "none") +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "bottom")
+
+ggplotly(map_plot, tooltip = "text") %>%
+  layout(dragmode = "zoom",
+         margin = list(l = 0, r = 0, t = 50, b = 0),
+         title = list(x = 0.01))
+
+Interpretation: Ireland sits in the mid-range compared to its peers, with more cases than several African countries but fewer than Western European nations.
+
+Bar Chart: Total Cases by Country
+
+{r bar-chart}
+cases_by_country %>%
+  ggplot(aes(x = reorder(location, total_cases), y = total_cases, fill = location)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = scales::comma(total_cases)), hjust = -0.1, size = 3.5) +
+  coord_flip() +
+  scale_y_continuous(labels = scales::label_comma()) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Total COVID-19 Cases (2020–2022)",
+       x = "Country",
+       y = "Total Confirmed Cases") +
+  theme(axis.text.y = element_text(face = "bold")) +
+  theme_minimal(base_size = 13)
+
+Interpretation: France and Germany reported the highest case counts, while Egypt and Nigeria had the lowest, suggesting regional variations in reporting, testing, or virus spread.
+
+Scatter Plot: Cases vs Population
+
+{r scatter-population}
+# Clean and extract population values for all available entries
+clean_metadata <- country_metadata %>%
+  mutate(location = recode(location, !!!name_map)) %>%
+  rowwise() %>%
+  mutate(population = {
+    p <- population
+    if (is.numeric(p)) p[1]
+    else if (is.list(p) && is.numeric(p[[1]])) p[[1]][1]
+    else if (is.data.frame(p) && "total" %in% names(p)) p$total[1]
+    else NA_real_
+  }) %>%
+  ungroup() %>%
+  filter(!is.na(population))
+
+# Recode study names to align with metadata
+cleaned_study_names <- recode(study_data_names, !!!name_map)
+
+# Identify countries present in both datasets and in the study list
+valid_locations <- intersect(
+  intersect(clean_metadata$location, cases_by_country$location),
+  cleaned_study_names
+)
+
+# Filter and join only on those valid countries
+scatter_data <- clean_metadata %>%
+  filter(location %in% valid_locations) %>%
+  inner_join(cases_by_country, by = "location") %>%
+  filter(!is.na(total_cases))
+
+cat("Valid scatter data entries:", nrow(scatter_data), "
+")
+print(scatter_data %>% select(location, population, total_cases))
+
+if (nrow(scatter_data) > 0) {
+  ggplot(scatter_data, aes(x = population, y = total_cases, label = location)) +
+    geom_point(shape = 1, size = 3, color = "#cc0000") +
+    geom_text(vjust = -0.8, size = 3, check_overlap = TRUE) +
+    geom_smooth(method = "lm", se = FALSE, color = "#444444") +
+    scale_x_log10(labels = scales::comma) +
+    scale_y_log10(labels = scales::comma) +
+    labs(title = "COVID-19 Cases vs Population",
+         x = "Population (log scale)",
+         y = "Total Cases (log scale)") +
+    theme_minimal(base_size = 13) +
+    theme(legend.position = "bottom")
+} else {
+  print("⚠️ No valid population data found for plotting.")
+}
+
+Insight: A positive correlation exists between population size and case count, but Ireland falls below the trendline — potentially indicating stronger containment.
+
+Time Series: Daily Cases Over Time
+
+{r time-series}
+country_data %>%
+  filter(location %in% study_data_names) %>%
+  mutate(date = ymd(date)) %>%
+  group_by(location, date) %>%
+  summarise(new_cases = sum(new_cases, na.rm = TRUE), .groups = "drop") %>%
+  ggplot(aes(x = date, y = new_cases, color = location)) +
+  geom_line() +
+  geom_smooth(se = FALSE, method = "loess", linetype = "dotted", size = 0.6) +
+  labs(title = "Daily COVID-19 Cases (2020–2022)",
+       x = "Date", y = "New Cases") +
+  theme_minimal()
+
+Trend: Multiple spikes are observed in most countries. Ireland had clear waves, with noticeable peaks in 2021 and late 2022.
+
+Conclusion
+
+This report illustrated the spread of COVID-19 in Ireland and 9 comparator countries, highlighting key differences in scale and timeline. Despite a smaller population, Ireland’s mid-level case rate suggests effective testing and mitigation. The inclusion of time series, population scaling, and geographical mapping provided a rich, multidimensional picture.
+
+References
+
+Our World in Data COVID-19 dataset: https://github.com/owid/covid-19-data
+
+Datasets: country_data.csv, country_metadata.csv
+
